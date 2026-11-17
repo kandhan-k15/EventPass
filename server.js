@@ -1,6 +1,7 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const db = require("./db");
 
 const app = express();
@@ -209,6 +210,81 @@ app.put("/api/events/:id", requireAuth, requireRole("organizer"), (req, res) => 
   ).run(String(title).trim(), description, String(venue).trim(), eventDate, seats, id);
 
   res.json(db.prepare(EVENT_SELECT + " WHERE e.id = ?").get(id));
+});
+
+// ---- Register for an event (students only) ----
+app.post("/api/events/:id/register", requireAuth, requireRole("student"), (req, res) => {
+  const eventId = Number(req.params.id);
+  const event = db.prepare("SELECT * FROM events WHERE id = ?").get(eventId);
+
+  if (!event) {
+    return res.status(404).json({ error: "Event not found" });
+  }
+  if (Date.parse(event.event_date) < Date.now()) {
+    return res.status(400).json({ error: "This event has already started" });
+  }
+
+  // Unguessable ticket code (this is what the QR code will hold on Day 6)
+  const ticketCode = crypto.randomBytes(16).toString("hex");
+
+  try {
+    // Transaction: counting the seats and saving the registration happen as ONE unit
+    db.exec("BEGIN IMMEDIATE");
+
+    const taken = db
+      .prepare("SELECT COUNT(*) AS n FROM registrations WHERE event_id = ?")
+      .get(eventId).n;
+
+    if (taken >= event.seat_limit) {
+      db.exec("ROLLBACK");
+      return res.status(409).json({ error: "Event is full" });
+    }
+
+    const result = db
+      .prepare("INSERT INTO registrations (user_id, event_id, ticket_code) VALUES (?, ?, ?)")
+      .run(req.user.id, eventId, ticketCode);
+
+    db.exec("COMMIT");
+
+    res.status(201).json({
+      registration_id: Number(result.lastInsertRowid),
+      event_id: eventId,
+      ticket_code: ticketCode,
+      status: "Registered",
+    });
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // no open transaction to roll back
+    }
+    if (String(err.message).includes("UNIQUE")) {
+      return res.status(409).json({ error: "You are already registered for this event" });
+    }
+    console.error(err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// ---- My tickets (students only) ----
+app.get("/api/my-tickets", requireAuth, requireRole("student"), (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT r.id AS registration_id, r.ticket_code, r.checked_in_at, r.created_at,
+              e.id AS event_id, e.title, e.venue, e.event_date
+       FROM registrations r
+       JOIN events e ON e.id = r.event_id
+       WHERE r.user_id = ?
+       ORDER BY e.event_date ASC`
+    )
+    .all(req.user.id);
+
+  res.json(
+    rows.map((row) => ({
+      ...row,
+      status: row.checked_in_at ? "Checked in" : "Registered",
+    }))
+  );
 });
 
 app.listen(3000, () => console.log("Server on http://localhost:3000"));
