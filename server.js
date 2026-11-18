@@ -8,19 +8,26 @@ const db = require("./db");
 const app = express();
 app.use(express.json());
 
+// Serve the website files from the "public" folder
+app.use(express.static(require("path").join(__dirname, "public")));
+
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   console.error("Missing JWT_SECRET. Create a .env file and start with npm start.");
   process.exit(1);
 }
 
-app.get("/", (req, res) => {
-  res.send("EventPass is running");
+
+// Edit this list to match your college's departments
+const DEPARTMENTS = ["IT", "CSE", "AIDS", "ECE", "EEE", "MECH", "CIVIL", "OTHER"];
+
+app.get("/api/departments", (req, res) => {
+  res.json(DEPARTMENTS);
 });
 
 // ---- Sign up ----
 app.post("/api/signup", (req, res) => {
-  const { name, email, password, role } = req.body;
+  const { name, email, password, role, department } = req.body;
 
   if (!name || !email || !password) {
     return res.status(400).json({ error: "Name, email and password are required" });
@@ -29,20 +36,26 @@ app.post("/api/signup", (req, res) => {
     return res.status(400).json({ error: "Password must be at least 8 characters" });
   }
 
+  const dept = department ? String(department).trim().toUpperCase() : null;
+  if (dept && !DEPARTMENTS.includes(dept)) {
+    return res.status(400).json({ error: "Please choose a valid department" });
+  }
+
   const userRole = role === "organizer" ? "organizer" : "student";
   const cleanEmail = email.trim().toLowerCase();
   const hash = bcrypt.hashSync(password, 10);
 
   try {
     const result = db
-      .prepare("INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)")
-      .run(name.trim(), cleanEmail, hash, userRole);
+      .prepare("INSERT INTO users (name, email, password_hash, role, department) VALUES (?, ?, ?, ?, ?)")
+      .run(name.trim(), cleanEmail, hash, userRole, dept);
 
     res.status(201).json({
       id: Number(result.lastInsertRowid),
       name: name.trim(),
       email: cleanEmail,
       role: userRole,
+      department: dept,
     });
   } catch (err) {
     if (String(err.message).includes("UNIQUE")) {
@@ -75,7 +88,7 @@ app.post("/api/login", (req, res) => {
 
   res.json({
     token,
-    user: { id: user.id, name: user.name, email: user.email, role: user.role },
+    user: { id: user.id, name: user.name, email: user.email, role: user.role, department: user.department },
   });
 });
 
@@ -98,7 +111,7 @@ function requireAuth(req, res, next) {
 
 app.get("/api/me", requireAuth, (req, res) => {
   const user = db
-    .prepare("SELECT id, name, email, role FROM users WHERE id = ?")
+    .prepare("SELECT id, name, email, role, department FROM users WHERE id = ?")
     .get(req.user.id);
   res.json(user);
 });
@@ -116,14 +129,43 @@ function requireRole(role) {
 // Event details plus how many seats are left
 const EVENT_SELECT = `
   SELECT e.id, e.title, e.description, e.venue, e.event_date,
-         e.seat_limit, e.organizer_id,
+         e.seat_limit, e.organizer_id, e.allowed_departments, e.form_url,
          e.seat_limit - (SELECT COUNT(*) FROM registrations r WHERE r.event_id = e.id) AS seats_left
   FROM events e
 `;
 
+// Checks the optional "open to departments" list and Google Form link
+function parseEventExtras(body) {
+  const out = { departments: undefined, formUrl: undefined };
+
+  if (body.allowed_departments !== undefined && body.allowed_departments !== null) {
+    const list = Array.isArray(body.allowed_departments)
+      ? body.allowed_departments
+      : String(body.allowed_departments).split(",");
+    const clean = [...new Set(list.map((d) => String(d).trim().toUpperCase()).filter(Boolean))];
+    if (clean.some((d) => !DEPARTMENTS.includes(d))) {
+      return { error: "Unknown department in allowed_departments" };
+    }
+    out.departments = clean.join(",");
+  }
+
+  if (body.form_url !== undefined) {
+    const url = String(body.form_url || "").trim();
+    if (url && (!/^https:\/\/\S+$/i.test(url) || url.length > 500)) {
+      return { error: "form_url must be a valid https:// link" };
+    }
+    out.formUrl = url || null; // only https links are accepted, so nobody can store a javascript: link
+  }
+  return out;
+}
+
 // ---- Create an event (organizers only) ----
 app.post("/api/events", requireAuth, requireRole("organizer"), (req, res) => {
   const { title, description, venue, event_date, seat_limit } = req.body;
+  const extras = parseEventExtras(req.body);
+  if (extras.error) {
+    return res.status(400).json({ error: extras.error });
+  }
   const seats = Number(seat_limit);
 
   if (!title || !venue || !event_date || !Number.isInteger(seats) || seats <= 0) {
@@ -137,7 +179,7 @@ app.post("/api/events", requireAuth, requireRole("organizer"), (req, res) => {
 
   const result = db
     .prepare(
-      "INSERT INTO events (title, description, venue, event_date, seat_limit, organizer_id) VALUES (?, ?, ?, ?, ?, ?)"
+      "INSERT INTO events (title, description, venue, event_date, seat_limit, organizer_id, allowed_departments, form_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .run(
       title.trim(),
@@ -145,7 +187,9 @@ app.post("/api/events", requireAuth, requireRole("organizer"), (req, res) => {
       venue.trim(),
       event_date,
       seats,
-      req.user.id
+      req.user.id,
+      extras.departments || "",
+      extras.formUrl || null
     );
 
   const event = db
@@ -206,9 +250,16 @@ app.put("/api/events/:id", requireAuth, requireRole("organizer"), (req, res) => 
     });
   }
 
+  const extras = parseEventExtras(req.body);
+  if (extras.error) {
+    return res.status(400).json({ error: extras.error });
+  }
+  const departments = extras.departments !== undefined ? extras.departments : event.allowed_departments;
+  const formUrl = extras.formUrl !== undefined ? extras.formUrl : event.form_url;
+
   db.prepare(
-    "UPDATE events SET title = ?, description = ?, venue = ?, event_date = ?, seat_limit = ? WHERE id = ?"
-  ).run(String(title).trim(), description, String(venue).trim(), eventDate, seats, id);
+    "UPDATE events SET title = ?, description = ?, venue = ?, event_date = ?, seat_limit = ?, allowed_departments = ?, form_url = ? WHERE id = ?"
+  ).run(String(title).trim(), description, String(venue).trim(), eventDate, seats, departments, formUrl, id);
 
   res.json(db.prepare(EVENT_SELECT + " WHERE e.id = ?").get(id));
 });
@@ -223,6 +274,20 @@ app.post("/api/events/:id/register", requireAuth, requireRole("student"), (req, 
   }
   if (Date.parse(event.event_date) < Date.now()) {
     return res.status(400).json({ error: "This event has already started" });
+  }
+
+  // Department-restricted events
+  if (event.allowed_departments) {
+    const allowed = event.allowed_departments.split(",");
+    const me = db.prepare("SELECT department FROM users WHERE id = ?").get(req.user.id);
+    if (!me.department || !allowed.includes(me.department)) {
+      return res.status(403).json({ error: "This event is only for: " + allowed.join(", ") });
+    }
+  }
+
+  // Events with a Google Form: the student must say they filled it
+  if (event.form_url && !(req.body && req.body.form_confirmed === true)) {
+    return res.status(400).json({ error: "Please fill the registration form first", form_url: event.form_url });
   }
 
   // Unguessable ticket code (this is what the QR code will hold on Day 6)
@@ -383,7 +448,7 @@ app.get("/api/events/:id/attendance", requireAuth, requireRole("organizer"), (re
 
   const rows = db
     .prepare(
-      `SELECT u.name, u.email, r.checked_in_at, r.created_at
+      `SELECT r.id AS registration_id, u.name, u.email, u.department, r.checked_in_at, r.created_at
        FROM registrations r
        JOIN users u ON u.id = r.user_id
        WHERE r.event_id = ?
@@ -402,6 +467,72 @@ app.get("/api/events/:id/attendance", requireAuth, requireRole("organizer"), (re
     checked_in: attendees.filter((a) => a.checked_in_at).length,
     attendees,
   });
+});
+
+// ---- Mark one student present or absent by hand (organizers, own events) ----
+app.put("/api/events/:id/attendance/:registrationId", requireAuth, requireRole("organizer"), (req, res) => {
+  const eventId = Number(req.params.id);
+  const event = db.prepare("SELECT organizer_id FROM events WHERE id = ?").get(eventId);
+
+  if (!event) {
+    return res.status(404).json({ error: "Event not found" });
+  }
+  if (event.organizer_id !== req.user.id) {
+    return res.status(403).json({ error: "You can only manage your own events" });
+  }
+
+  const present = req.body && req.body.present === true;
+  const sql = present
+    ? "UPDATE registrations SET checked_in_at = COALESCE(checked_in_at, CURRENT_TIMESTAMP) WHERE id = ? AND event_id = ?"
+    : "UPDATE registrations SET checked_in_at = NULL WHERE id = ? AND event_id = ?";
+  const result = db.prepare(sql).run(Number(req.params.registrationId), eventId);
+
+  if (result.changes === 0) {
+    return res.status(404).json({ error: "Registration not found for this event" });
+  }
+  res.json({ ok: true, status: present ? "Checked in" : "Registered" });
+});
+
+// One CSV cell. A leading = + - @ is neutralised so Excel can't run it as a formula
+function csvCell(value) {
+  let text = value === null || value === undefined ? "" : String(value);
+  if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
+  return '"' + text.replace(/"/g, '""') + '"';
+}
+
+// ---- Attendance report as a CSV download (organizers, own events) ----
+app.get("/api/events/:id/attendance.csv", requireAuth, requireRole("organizer"), (req, res) => {
+  const eventId = Number(req.params.id);
+  const event = db.prepare("SELECT * FROM events WHERE id = ?").get(eventId);
+
+  if (!event) {
+    return res.status(404).json({ error: "Event not found" });
+  }
+  if (event.organizer_id !== req.user.id) {
+    return res.status(403).json({ error: "You can only view your own events" });
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT u.name, u.email, u.department, r.created_at, r.checked_in_at
+       FROM registrations r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.event_id = ?
+       ORDER BY u.name`
+    )
+    .all(eventId);
+
+  const lines = [["Name", "Email", "Department", "Registered at", "Status", "Checked in at"]];
+  for (const r of rows) {
+    lines.push([r.name, r.email, r.department, r.created_at, r.checked_in_at ? "Present" : "Absent", r.checked_in_at]);
+  }
+  const csv = "\uFEFF" + lines.map((line) => line.map(csvCell).join(",")).join("\r\n");
+
+  res.set({
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": `attachment; filename="attendance-event-${eventId}.csv"`,
+  });
+  res.send(csv);
 });
 
 app.listen(3000, () => console.log("Server on http://localhost:3000"));

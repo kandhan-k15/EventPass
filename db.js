@@ -35,4 +35,15 @@ db.exec(`
   );
 `);
 
+// Small "migration": add new columns to tables that already exist, keeping your data
+function addColumn(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!columns.includes(column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+addColumn("users", "department", "TEXT");
+addColumn("events", "allowed_departments", "TEXT"); // e.g. "IT,CSE"; empty means everyone
+addColumn("events", "form_url", "TEXT");            // optional Google Form link
+
 module.exports = db;

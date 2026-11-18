@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EventPass | Events</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700;800&display=swap">
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <div class="page">
+    <div class="topbar">
+      <div>
+        <h1>Upcoming events</h1>
+        <div class="who" id="who"></div>
+      </div>
+      <div class="nav">
+        <a id="nav-other" href="/tickets.html">My tickets</a>
+        <button class="btn small ghost" id="logout" type="button">Log out</button>
+      </div>
+    </div>
+
+    <div id="msg" class="msg" role="status"></div>
+    <div id="list"></div>
+  </div>
+
+  <dialog id="done">
+    <h2>Successfully registered!</h2>
+    <p>Your seat is confirmed and your QR ticket is ready.</p>
+    <a class="btn" href="/tickets.html">View my QR ticket</a>
+    <button class="btn ghost" type="button" id="close-done">Close</button>
+  </dialog>
+
+  <script src="/js/app.js"></script>
+  <script>
+    if (!App.token()) {
+      // remember where they were going (for example the Google Form return link)
+      sessionStorage.setItem("afterLogin", location.pathname + location.search);
+      location.href = "/";
+    }
+
+    const user = App.user();
+    const isStudent = user.role === "student";
+    document.getElementById("who").textContent = user.name + " (" + user.role + ")";
+    document.getElementById("logout").onclick = App.logout;
+    if (!isStudent) {
+      const other = document.getElementById("nav-other");
+      other.href = "/organizer.html";
+      other.textContent = "Dashboard";
+    }
+
+    const msg = document.getElementById("msg");
+    const list = document.getElementById("list");
+
+    // Build elements with textContent so event titles can never inject HTML
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    function render(events) {
+      list.replaceChildren();
+      if (events.length === 0) {
+        list.append(el("div", "empty", "No events yet."));
+        return;
+      }
+      for (const ev of events) {
+        const card = el("div", "card event");
+        card.append(el("h2", "", ev.title));
+        card.append(el("div", "meta", "Venue: " + ev.venue));
+        card.append(el("div", "meta", "When: " + new Date(ev.event_date).toLocaleString()));
+        if (ev.description) card.append(el("div", "meta", ev.description));
+        if (ev.allowed_departments) card.append(el("div", "meta", "Open to: " + ev.allowed_departments.split(",").join(", ")));
+
+        const foot = el("div", "event-foot");
+        const full = ev.seats_left <= 0;
+        foot.append(el("span", "seats" + (full ? " full" : ""),
+          full ? "Full" : ev.seats_left + " of " + ev.seat_limit + " seats left"));
+
+        if (isStudent) {
+          const btn = el("button", "btn small", full ? "Full" : ev.form_url ? "Fill registration form" : "Register");
+          btn.type = "button";
+          btn.disabled = full;
+          btn.onclick = () => {
+            if (ev.form_url && !btn.dataset.opened) {
+              window.open(ev.form_url, "_blank", "noopener");
+              btn.dataset.opened = "1";
+              btn.textContent = "I’ve submitted the form";
+              App.say(msg, "Fill and submit the form in the new tab, then come back and press the I’ve submitted the form button.", "ok");
+            } else {
+              register(ev, btn);
+            }
+          };
+          foot.append(btn);
+        }
+        card.append(foot);
+        list.append(card);
+      }
+    }
+
+    async function load() {
+      try {
+        render(await App.call("/api/events"));
+      } catch (err) {
+        App.say(msg, err.message, "error");
+      }
+    }
+
+    async function registerById(eventId, formConfirmed) {
+      try {
+        await App.call("/api/events/" + eventId + "/register", {
+          method: "POST",
+          body: formConfirmed ? { form_confirmed: true } : undefined,
+        });
+        msg.className = "msg";
+        document.getElementById("done").showModal();
+      } catch (err) {
+        App.say(msg, err.message, "error");
+      }
+      await load();
+    }
+
+    function register(ev, btn) {
+      btn.disabled = true;
+      return registerById(ev.id, Boolean(ev.form_url));
+    }
+
+    document.getElementById("close-done").onclick = () => document.getElementById("done").close();
+
+    // The Google Form confirmation message can link back here: /events.html?confirm=EVENT_ID
+    const confirmId = new URLSearchParams(location.search).get("confirm");
+    if (confirmId && isStudent) {
+      history.replaceState(null, "", "/events.html"); // a refresh won't register twice
+      registerById(Number(confirmId), true);
+    } else {
+      load();
+    }
+  </script>
+</body>
+</html>

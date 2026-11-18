@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EventPass | Sign in</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700;800&display=swap">
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <div class="auth-wrap">
+    <div class="card auth-card">
+      <div class="mark">E</div>
+      <h1>Welcome to EventPass</h1>
+      <p class="sub">Register for campus events and check in with a QR ticket.</p>
+
+      <div class="tabs">
+        <button type="button" id="tab-login" class="active">Sign in</button>
+        <button type="button" id="tab-signup">Create account</button>
+      </div>
+
+      <form id="form" novalidate>
+        <div id="name-row" hidden>
+          <label for="name">Full name</label>
+          <input id="name" autocomplete="name">
+        </div>
+
+        <label for="email">Email address</label>
+        <input id="email" type="email" autocomplete="email" placeholder="name@example.com">
+
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters">
+
+        <div id="role-row" hidden>
+          <label for="role">I am a</label>
+          <select id="role">
+            <option value="student">Student</option>
+            <option value="organizer">Organizer</option>
+          </select>
+        </div>
+
+        <div id="dept-row" hidden>
+          <label for="department">Department</label>
+          <select id="department"></select>
+        </div>
+
+        <button class="btn block" id="submit" type="submit">Sign in</button>
+        <div id="msg" class="msg" role="alert"></div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script>
+    if (App.token()) location.href = App.home(App.user()); // already logged in
+
+    let mode = "login";
+    const $ = (id) => document.getElementById(id);
+
+    function setMode(next) {
+      mode = next;
+      $("tab-login").classList.toggle("active", mode === "login");
+      $("tab-signup").classList.toggle("active", mode === "signup");
+      $("name-row").hidden = mode === "login";
+      $("role-row").hidden = mode === "login";
+      $("dept-row").hidden = mode === "login";
+      $("submit").textContent = mode === "login" ? "Sign in" : "Create account";
+      $("msg").className = "msg";
+    }
+    $("tab-login").onclick = () => setMode("login");
+    $("tab-signup").onclick = () => setMode("signup");
+
+    App.call("/api/departments", { noAuth: true }).then((list) => {
+      $("department").replaceChildren(...list.map((d) => new Option(d, d)));
+    });
+
+    $("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const email = $("email").value.trim();
+      const password = $("password").value;
+      const msg = $("msg");
+      $("submit").disabled = true;
+
+      try {
+        if (mode === "signup") {
+          await App.call("/api/signup", {
+            method: "POST",
+            noAuth: true,
+            body: { name: $("name").value, email, password, role: $("role").value, department: $("department").value },
+          });
+        }
+        const data = await App.call("/api/login", {
+          method: "POST",
+          noAuth: true,
+          body: { email, password },
+        });
+        App.save(data.token, data.user);
+        const next = sessionStorage.getItem("afterLogin");
+        sessionStorage.removeItem("afterLogin");
+        location.href = next && next.startsWith("/") && !next.startsWith("//") ? next : App.home(data.user);
+      } catch (err) {
+        App.say(msg, err.message, "error");
+      } finally {
+        $("submit").disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
