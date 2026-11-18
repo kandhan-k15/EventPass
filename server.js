@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const QRCode = require("qrcode");
 const db = require("./db");
 
 const app = express();
@@ -285,6 +286,122 @@ app.get("/api/my-tickets", requireAuth, requireRole("student"), (req, res) => {
       status: row.checked_in_at ? "Checked in" : "Registered",
     }))
   );
+});
+
+// ---- One ticket with its QR image (students, own tickets only) ----
+app.get("/api/tickets/:registrationId", requireAuth, requireRole("student"), async (req, res) => {
+  const ticket = db
+    .prepare(
+      `SELECT r.id AS registration_id, r.user_id, r.ticket_code, r.checked_in_at,
+              e.id AS event_id, e.title, e.venue, e.event_date
+       FROM registrations r
+       JOIN events e ON e.id = r.event_id
+       WHERE r.id = ?`
+    )
+    .get(Number(req.params.registrationId));
+
+  // Same answer whether it doesn't exist or belongs to someone else
+  if (!ticket || ticket.user_id !== req.user.id) {
+    return res.status(404).json({ error: "Ticket not found" });
+  }
+
+  try {
+    const qr = await QRCode.toDataURL(ticket.ticket_code, { width: 300, margin: 2 });
+    const { user_id, ...safe } = ticket;
+    res.json({
+      ...safe,
+      status: ticket.checked_in_at ? "Checked in" : "Registered",
+      qr,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not create the QR code" });
+  }
+});
+
+// ---- Check a student in by ticket code (organizers only) ----
+app.post("/api/checkin", requireAuth, requireRole("organizer"), (req, res) => {
+  const code =
+    typeof req.body.ticket_code === "string" ? req.body.ticket_code.trim().toLowerCase() : "";
+
+  if (!code) {
+    return res.status(400).json({ error: "ticket_code is required" });
+  }
+
+  const ticket = db
+    .prepare(
+      `SELECT r.id, u.name AS student_name, e.title AS event_title, e.organizer_id
+       FROM registrations r
+       JOIN users u ON u.id = r.user_id
+       JOIN events e ON e.id = r.event_id
+       WHERE r.ticket_code = ?`
+    )
+    .get(code);
+
+  if (!ticket) {
+    return res.status(404).json({ result: "invalid", error: "Invalid ticket" });
+  }
+  if (ticket.organizer_id !== req.user.id) {
+    return res.status(403).json({ result: "wrong_event", error: "This ticket is for another organizer's event" });
+  }
+
+  // One statement does "check it is still empty" AND "write the time", so it can only succeed once
+  const update = db
+    .prepare("UPDATE registrations SET checked_in_at = CURRENT_TIMESTAMP WHERE id = ? AND checked_in_at IS NULL")
+    .run(ticket.id);
+
+  const row = db.prepare("SELECT checked_in_at FROM registrations WHERE id = ?").get(ticket.id);
+
+  if (update.changes === 0) {
+    return res.status(409).json({
+      result: "already_checked_in",
+      error: "Already checked in",
+      student_name: ticket.student_name,
+      checked_in_at: row.checked_in_at,
+    });
+  }
+
+  res.json({
+    result: "success",
+    student_name: ticket.student_name,
+    event_title: ticket.event_title,
+    checked_in_at: row.checked_in_at,
+  });
+});
+
+// ---- Attendance list for one of your events (organizers only) ----
+app.get("/api/events/:id/attendance", requireAuth, requireRole("organizer"), (req, res) => {
+  const eventId = Number(req.params.id);
+  const event = db.prepare("SELECT * FROM events WHERE id = ?").get(eventId);
+
+  if (!event) {
+    return res.status(404).json({ error: "Event not found" });
+  }
+  if (event.organizer_id !== req.user.id) {
+    return res.status(403).json({ error: "You can only view your own events" });
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT u.name, u.email, r.checked_in_at, r.created_at
+       FROM registrations r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.event_id = ?
+       ORDER BY u.name`
+    )
+    .all(eventId);
+
+  const attendees = rows.map((row) => ({
+    ...row,
+    status: row.checked_in_at ? "Checked in" : "Registered",
+  }));
+
+  res.json({
+    event: event.title,
+    registered: attendees.length,
+    checked_in: attendees.filter((a) => a.checked_in_at).length,
+    attendees,
+  });
 });
 
 app.listen(3000, () => console.log("Server on http://localhost:3000"));
