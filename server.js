@@ -3,7 +3,6 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const QRCode = require("qrcode");
-const nodemailer = require("nodemailer");
 const dns = require("dns").promises;
 const path = require("path");
 const db = require("./db");
@@ -20,30 +19,37 @@ if (!JWT_SECRET) {
 
 const PORT = process.env.PORT || 3000;
 
-// ---- Brevo SMTP Transporter ----
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp-relay.brevo.com",
-  port: Number(process.env.SMTP_PORT) || 587,
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+// ---- Brevo API Email Configuration ----
 
 async function sendEmail(to, subject, text) {
   try {
-    await transporter.sendMail({
-      from: {
-    name: process.env.SMTP_FROM_NAME || "EventPass",
-    address: process.env.SMTP_FROM
-},
-      to,
-      subject,
-      text,
+    const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "api-key": process.env.BREVO_API_KEY,
+        "Content-Type": "application/json",
+        "accept": "application/json"
+      },
+      body: JSON.stringify({
+        sender: {
+          name: process.env.SMTP_FROM_NAME || "EventPass",
+          email: process.env.SMTP_FROM
+        },
+        to: [{ email: to }],
+        subject,
+        textContent: text
+      })
     });
 
+    const result = await response.text();
+
+    if (!response.ok) {
+      console.error("Brevo API Error:", response.status, result);
+      throw new Error("Brevo API email delivery failed");
+    }
+
     console.log("Email sent successfully to:", to);
+    console.log("Brevo response:", result);
 
   } catch (err) {
     console.error("Brevo email send error:", err);
