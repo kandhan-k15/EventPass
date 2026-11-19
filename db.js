@@ -1,5 +1,7 @@
 const { DatabaseSync } = require("node:sqlite");
-const db = new DatabaseSync("eventpass.db");
+
+const dbPath = process.env.DB_PATH || "eventpass.db";
+const db = new DatabaseSync(dbPath);
 
 db.exec(`
   PRAGMA foreign_keys = ON;
