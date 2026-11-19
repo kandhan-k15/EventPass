@@ -11,24 +11,40 @@
   <div class="page">
     <div class="topbar">
       <div>
-        <h1>Organizer dashboard</h1>
+        <h1>Organizer Dashboard</h1>
         <div class="who" id="who"></div>
       </div>
       <div class="nav">
-        <a href="/events.html">All events</a>
         <button class="btn small ghost" id="logout" type="button">Log out</button>
       </div>
     </div>
 
-    <div class="card">
+    <div id="msg" class="msg" role="status"></div>
+
+    <div class="card" style="margin-bottom: 24px;">
+      <h2 class="section" style="margin-top:0">Event Analytics & Insights</h2>
+      <div class="row2" style="margin-bottom: 16px;">
+        <div style="background: #eef2ff; padding: 16px; border-radius: 14px; border: 1px solid #c7d2fe;">
+          <div class="meta">Total Registrations</div>
+          <div id="stat-reg" style="font-size: 26px; font-weight: 800; color: var(--accent);">0</div>
+        </div>
+        <div style="background: #ecfdf5; padding: 16px; border-radius: 14px; border: 1px solid #a7f3d0;">
+          <div class="meta">Overall Attendance Rate</div>
+          <div id="stat-rate" style="font-size: 26px; font-weight: 800; color: var(--ok);">0%</div>
+        </div>
+      </div>
+      <div id="dept-breakdown" class="meta" style="font-weight: 600;">Department breakdown: Loading...</div>
+    </div>
+
+    <div class="card" style="margin-bottom: 24px;">
       <h2 class="section" style="margin-top:0">Create an event</h2>
       <form id="form" novalidate>
-        <label for="title">Title</label>
-        <input id="title">
-        <label for="description">Description (optional)</label>
-        <input id="description">
-        <label for="venue">Venue</label>
-        <input id="venue">
+        <label for="title">Title (2-100 chars)</label>
+        <input id="title" maxlength="100">
+        <label for="description">Description (optional, max 500 chars)</label>
+        <input id="description" maxlength="500">
+        <label for="venue">Venue (2-100 chars)</label>
+        <input id="venue" maxlength="100">
         <div class="row2">
           <div>
             <label for="event_date">Date and time</label>
@@ -45,35 +61,54 @@
         <input id="form_url" type="url" placeholder="https://forms.gle/...">
         <button class="btn block" type="submit" id="submit">Publish event</button>
       </form>
-      <div id="msg" class="msg" role="status"></div>
     </div>
 
     <h2 class="section">Your events</h2>
     <div id="list"></div>
   </div>
 
+  <dialog id="edit" class="wide animated-modal">
+    <h2>Edit event</h2>
+    <label for="e_title">Title</label>
+    <input id="e_title" maxlength="100">
+    <label for="e_description">Description</label>
+    <input id="e_description" maxlength="500">
+    <label for="e_venue">Venue</label>
+    <input id="e_venue" maxlength="100">
+    <div class="row2">
+      <div>
+        <label for="e_date">Date and time</label>
+        <input id="e_date" type="datetime-local">
+      </div>
+      <div>
+        <label for="e_seats">Seats</label>
+        <input id="e_seats" type="number" min="1">
+      </div>
+    </div>
+    <label>Open to departments <span class="who">(tick none = everyone)</span></label>
+    <div id="e_depts" class="checks"></div>
+    <label for="e_form_url">Google Form link (optional)</label>
+    <input id="e_form_url" type="url">
+    <div id="e_msg" class="msg" role="alert"></div>
+    <div class="actions" style="margin-top:16px">
+      <button class="btn ghost" type="button" id="e_cancel">Cancel</button>
+      <button class="btn" type="button" id="e_save">Save changes</button>
+    </div>
+  </dialog>
+
   <script src="/js/app.js"></script>
   <script>
     if (!App.token()) location.href = "/";
     const user = App.user();
-    if (user.role !== "organizer") location.href = App.home(user);
+    if (!user || user.role !== "organizer") location.href = App.home(user);
     document.getElementById("who").textContent = user.name + " (organizer)";
     document.getElementById("logout").onclick = App.logout;
 
     const $ = (id) => document.getElementById(id);
     const msg = $("msg");
     const list = $("list");
-
-    App.call("/api/departments").then((names) => {
-      for (const d of names) {
-        const label = el("label", "check");
-        const box = el("input");
-        box.type = "checkbox";
-        box.value = d;
-        label.append(box, " " + d);
-        $("depts").append(label);
-      }
-    });
+    let departments = [];
+    let editingId = null;
 
     function el(tag, className, text) {
       const node = document.createElement(tag);
@@ -82,8 +117,98 @@
       return node;
     }
 
+    function toLocalDateTimeLocal(isoString) {
+      if (!isoString) return "";
+      const d = new Date(isoString);
+      if (isNaN(d.getTime())) return isoString;
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function fillDepartments(box, selected = []) {
+      box.replaceChildren();
+      for (const d of departments) {
+        const label = el("label", "check");
+        const input = el("input");
+        input.type = "checkbox";
+        input.value = d;
+        input.checked = selected.includes(d);
+        label.append(input, " " + d);
+        box.append(label);
+      }
+    }
+    const ticked = (box) => [...box.querySelectorAll("input:checked")].map((b) => b.value);
+
+    function openEdit(ev) {
+      editingId = ev.id;
+      $("e_title").value = ev.title;
+      $("e_description").value = ev.description || "";
+      $("e_venue").value = ev.venue;
+      $("e_date").value = toLocalDateTimeLocal(ev.event_date);
+      $("e_seats").value = ev.seat_limit;
+      $("e_form_url").value = ev.form_url || "";
+      fillDepartments($("e_depts"), ev.allowed_departments ? ev.allowed_departments.split(",") : []);
+      $("e_msg").className = "msg";
+      $("edit").showModal();
+    }
+
+    $("e_cancel").onclick = () => $("edit").close();
+    $("e_save").onclick = async () => {
+      try {
+        await App.call("/api/events/" + editingId, {
+          method: "PUT",
+          body: {
+            title: $("e_title").value,
+            description: $("e_description").value,
+            venue: $("e_venue").value,
+            event_date: $("e_date").value,
+            seat_limit: Number($("e_seats").value),
+            allowed_departments: ticked($("e_depts")),
+            form_url: $("e_form_url").value.trim(),
+          },
+        });
+        $("edit").close();
+        App.say(msg, "Event updated.", "ok");
+        await load();
+      } catch (err) {
+        App.say($("e_msg"), err.message, "error");
+      }
+    };
+
+    async function removeEvent(ev, stats) {
+      const yes = await App.confirm(
+        "Delete “" + ev.title + "”?",
+        stats.registered + " registration(s) and " + stats.waiting + " waiting-list entr" +
+          (stats.waiting === 1 ? "y" : "ies") + " will be deleted too. This cannot be undone.",
+        "Yes, delete event"
+      );
+      if (!yes) return;
+      try {
+        await App.call("/api/events/" + ev.id, { method: "DELETE" });
+        App.say(msg, "Event deleted.", "ok");
+        await load();
+      } catch (err) {
+        App.say(msg, err.message, "error");
+      }
+    }
+
+    async function loadAnalytics() {
+      try {
+        const stats = await App.call("/api/organizer/analytics");
+        $("stat-reg").textContent = stats.totalRegistered;
+        $("stat-rate").textContent = stats.attendanceRate + "%";
+        const deptText = stats.departmentBreakdown.length > 0
+          ? stats.departmentBreakdown.map((d) => `${d.department}: ${d.count}`).join(" | ")
+          : "No departmental registrations yet.";
+        $("dept-breakdown").textContent = "Department breakdown: " + deptText;
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
     async function load() {
       try {
+        await loadAnalytics();
         const all = await App.call("/api/events");
         const mine = all.filter((ev) => ev.organizer_id === user.id);
         const stats = await Promise.all(
@@ -101,13 +226,23 @@
           card.append(el("h2", "", ev.title));
           card.append(el("div", "meta", "Venue: " + ev.venue));
           card.append(el("div", "meta", "When: " + new Date(ev.event_date).toLocaleString()));
-          const foot = el("div", "event-foot");
-          foot.append(el("span", "seats",
-            s.registered + " / " + ev.seat_limit + " registered, " + s.checked_in + " checked in"));
-          const manage = el("a", "btn small", "Participants and attendance");
+          card.append(el("div", "seats",
+            s.registered + " / " + ev.seat_limit + " registered, " + s.checked_in + " checked in" +
+            (s.waiting ? ", " + s.waiting + " waiting" : "")));
+
+          const actions = el("div", "actions");
+          actions.style.justifyContent = "flex-start";
+          actions.style.marginTop = "14px";
+          const manage = el("a", "btn small", "Participants and check-in");
           manage.href = "/manage.html?event=" + ev.id;
-          foot.append(manage);
-          card.append(foot);
+          const edit = el("button", "btn small ghost", "Edit");
+          edit.type = "button";
+          edit.onclick = () => openEdit(ev);
+          const del = el("button", "btn small danger-ghost", "Delete");
+          del.type = "button";
+          del.onclick = () => removeEvent(ev, s);
+          actions.append(manage, edit, del);
+          card.append(actions);
           list.append(card);
         });
       } catch (err) {
@@ -127,7 +262,7 @@
             venue: $("venue").value,
             event_date: $("event_date").value,
             seat_limit: Number($("seat_limit").value),
-            allowed_departments: [...document.querySelectorAll("#depts input:checked")].map((b) => b.value),
+            allowed_departments: ticked($("depts")),
             form_url: $("form_url").value.trim(),
           },
         });
@@ -142,6 +277,10 @@
       }
     });
 
+    App.call("/api/departments").then((names) => {
+      departments = names;
+      fillDepartments($("depts"));
+    });
     load();
   </script>
 </body>

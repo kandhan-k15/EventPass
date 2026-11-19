@@ -11,7 +11,7 @@
   <div class="page">
     <div class="topbar">
       <div>
-        <h1>Upcoming events</h1>
+        <h1 id="page-heading">Events & Campus Activities</h1>
         <div class="who" id="who"></div>
       </div>
       <div class="nav">
@@ -20,11 +20,21 @@
       </div>
     </div>
 
+    <div class="toolbar">
+      <input id="search" placeholder="Search events by title or venue...">
+      <select id="filter-dept">
+        <option value="">All Departments</option>
+      </select>
+      <label class="check" style="font-size:14px;">
+        <input type="checkbox" id="hide-past"> Hide past events
+      </label>
+    </div>
+
     <div id="msg" class="msg" role="status"></div>
     <div id="list"></div>
   </div>
 
-  <dialog id="done">
+  <dialog id="done" class="animated-modal">
     <h2>Successfully registered!</h2>
     <p>Your seat is confirmed and your QR ticket is ready.</p>
     <a class="btn" href="/tickets.html">View my QR ticket</a>
@@ -34,25 +44,28 @@
   <script src="/js/app.js"></script>
   <script>
     if (!App.token()) {
-      // remember where they were going (for example the Google Form return link)
       sessionStorage.setItem("afterLogin", location.pathname + location.search);
       location.href = "/";
     }
 
     const user = App.user();
+    if (!user) App.logout();
     const isStudent = user.role === "student";
+    if (!isStudent) location.href = "/organizer.html";
     document.getElementById("who").textContent = user.name + " (" + user.role + ")";
     document.getElementById("logout").onclick = App.logout;
-    if (!isStudent) {
-      const other = document.getElementById("nav-other");
-      other.href = "/organizer.html";
-      other.textContent = "Dashboard";
-    }
 
     const msg = document.getElementById("msg");
     const list = document.getElementById("list");
+    let allEvents = [];
+    let registeredSet = new Set();
+    let waitPosMap = new Map();
 
-    // Build elements with textContent so event titles can never inject HTML
+    App.call("/api/departments").then((depts) => {
+      const select = document.getElementById("filter-dept");
+      for (const d of depts) select.append(new Option(d, d));
+    });
+
     function el(tag, className, text) {
       const node = document.createElement(tag);
       if (className) node.className = className;
@@ -60,52 +73,14 @@
       return node;
     }
 
-    function render(events) {
-      list.replaceChildren();
-      if (events.length === 0) {
-        list.append(el("div", "empty", "No events yet."));
-        return;
-      }
-      for (const ev of events) {
-        const card = el("div", "card event");
-        card.append(el("h2", "", ev.title));
-        card.append(el("div", "meta", "Venue: " + ev.venue));
-        card.append(el("div", "meta", "When: " + new Date(ev.event_date).toLocaleString()));
-        if (ev.description) card.append(el("div", "meta", ev.description));
-        if (ev.allowed_departments) card.append(el("div", "meta", "Open to: " + ev.allowed_departments.split(",").join(", ")));
-
-        const foot = el("div", "event-foot");
-        const full = ev.seats_left <= 0;
-        foot.append(el("span", "seats" + (full ? " full" : ""),
-          full ? "Full" : ev.seats_left + " of " + ev.seat_limit + " seats left"));
-
-        if (isStudent) {
-          const btn = el("button", "btn small", full ? "Full" : ev.form_url ? "Fill registration form" : "Register");
-          btn.type = "button";
-          btn.disabled = full;
-          btn.onclick = () => {
-            if (ev.form_url && !btn.dataset.opened) {
-              window.open(ev.form_url, "_blank", "noopener");
-              btn.dataset.opened = "1";
-              btn.textContent = "I’ve submitted the form";
-              App.say(msg, "Fill and submit the form in the new tab, then come back and press the I’ve submitted the form button.", "ok");
-            } else {
-              register(ev, btn);
-            }
-          };
-          foot.append(btn);
-        }
-        card.append(foot);
-        list.append(card);
-      }
-    }
-
-    async function load() {
+    async function run(action, okText) {
       try {
-        render(await App.call("/api/events"));
+        const result = await action();
+        if (okText) App.say(msg, okText(result), "ok");
       } catch (err) {
         App.say(msg, err.message, "error");
       }
+      await load();
     }
 
     async function registerById(eventId, formConfirmed) {
@@ -122,17 +97,147 @@
       await load();
     }
 
-    function register(ev, btn) {
-      btn.disabled = true;
-      return registerById(ev.id, Boolean(ev.form_url));
+    function joinWaitlist(ev) {
+      return run(
+        () => App.call("/api/events/" + ev.id + "/waitlist", {
+          method: "POST",
+          body: ev.form_url ? { form_confirmed: true } : undefined,
+        }),
+        (r) => "You are number " + r.position + " on the waiting list. If a seat frees up you are registered automatically; check My tickets."
+      );
     }
 
+    async function cancelRegistration(ev) {
+      const yes = await App.confirm(
+        "Cancel your registration?",
+        "You will lose your seat for " + ev.title + ". The first student on the waiting list (if any) gets it.",
+        "Yes, cancel"
+      );
+      if (yes) {
+        await run(() => App.call("/api/events/" + ev.id + "/register", { method: "DELETE" }),
+          () => "Your registration was cancelled.");
+      }
+    }
+
+    function leaveWaitlist(ev) {
+      return run(() => App.call("/api/events/" + ev.id + "/waitlist", { method: "DELETE" }),
+        () => "You left the waiting list.");
+    }
+
+    function studentActions(ev, isIn, position, full, isPast) {
+      const box = el("div", "actions");
+      if (isPast) {
+        box.append(el("span", "badge past", "Event Ended"));
+        return box;
+      }
+      if (isIn) {
+        box.append(el("span", "badge done", "Registered"));
+        const cancel = el("button", "btn small danger-ghost", "Cancel registration");
+        cancel.type = "button";
+        cancel.onclick = () => cancelRegistration(ev);
+        box.append(cancel);
+        return box;
+      }
+      if (position) {
+        box.append(el("span", "badge wait", "Waiting list #" + position));
+        const leave = el("button", "btn small ghost", "Leave list");
+        leave.type = "button";
+        leave.onclick = () => leaveWaitlist(ev);
+        box.append(leave);
+        return box;
+      }
+      const label = ev.form_url ? "Fill registration form" : full ? "Join waiting list" : "Register";
+      const main = el("button", "btn small", label);
+      main.type = "button";
+      main.onclick = () => {
+        if (ev.form_url && !main.dataset.opened) {
+          window.open(ev.form_url, "_blank", "noopener");
+          main.dataset.opened = "1";
+          main.textContent = "I’ve submitted the form";
+          App.say(msg, "Fill and submit the form in the new tab, then come back and press the I’ve submitted the form button.", "ok");
+          return;
+        }
+        main.disabled = true;
+        if (full) joinWaitlist(ev);
+        else registerById(ev.id, Boolean(ev.form_url));
+      };
+      box.append(main);
+      return box;
+    }
+
+    function render() {
+      const query = document.getElementById("search").value.trim().toLowerCase();
+      const deptFilter = document.getElementById("filter-dept").value;
+      const hidePast = document.getElementById("hide-past").checked;
+
+      const filtered = allEvents.filter((ev) => {
+        const isPast = Date.parse(ev.event_date) < Date.now();
+        if (hidePast && isPast) return false;
+        if (query && !ev.title.toLowerCase().includes(query) && !ev.venue.toLowerCase().includes(query)) return false;
+        if (deptFilter && ev.allowed_departments && !ev.allowed_departments.split(",").includes(deptFilter)) return false;
+        return true;
+      });
+
+      list.replaceChildren();
+      if (filtered.length === 0) {
+        list.append(el("div", "empty", "No events match your search or filter."));
+        return;
+      }
+
+      for (const ev of filtered) {
+        const isPast = Date.parse(ev.event_date) < Date.now();
+        const full = ev.seats_left <= 0;
+        const card = el("div", "card event");
+
+        const headerRow = el("div");
+        headerRow.style.display = "flex";
+        headerRow.style.justifyContent = "space-between";
+        headerRow.style.alignItems = "flex-start";
+
+        headerRow.append(el("h2", "", ev.title));
+        if (isPast) headerRow.append(el("span", "badge past", "Past Event"));
+        card.append(headerRow);
+
+        card.append(el("div", "meta", "Venue: " + ev.venue));
+        card.append(el("div", "meta", "When: " + new Date(ev.event_date).toLocaleString()));
+        if (ev.description) card.append(el("div", "meta", ev.description));
+        if (ev.allowed_departments) {
+          card.append(el("div", "meta", "Open to: " + ev.allowed_departments.split(",").join(", ")));
+        }
+
+        const foot = el("div", "event-foot");
+        foot.append(el("span", "seats" + (full && !isPast ? " full" : ""),
+          isPast ? "Completed" : full ? "Full" : ev.seats_left + " of " + ev.seat_limit + " seats left"));
+        if (isStudent) {
+          foot.append(studentActions(ev, registeredSet.has(ev.id), waitPosMap.get(ev.id), full, isPast));
+        }
+        card.append(foot);
+        list.append(card);
+      }
+    }
+
+    async function load() {
+      try {
+        const calls = [App.call("/api/events")];
+        if (isStudent) calls.push(App.call("/api/my-tickets"), App.call("/api/my-waitlist"));
+        const [events, tickets = [], waits = []] = await Promise.all(calls);
+        allEvents = events;
+        registeredSet = new Set(tickets.map((t) => t.event_id));
+        waitPosMap = new Map(waits.map((w) => [w.event_id, w.position]));
+        render();
+      } catch (err) {
+        App.say(msg, err.message, "error");
+      }
+    }
+
+    document.getElementById("search").addEventListener("input", render);
+    document.getElementById("filter-dept").addEventListener("change", render);
+    document.getElementById("hide-past").addEventListener("change", render);
     document.getElementById("close-done").onclick = () => document.getElementById("done").close();
 
-    // The Google Form confirmation message can link back here: /events.html?confirm=EVENT_ID
     const confirmId = new URLSearchParams(location.search).get("confirm");
     if (confirmId && isStudent) {
-      history.replaceState(null, "", "/events.html"); // a refresh won't register twice
+      history.replaceState(null, "", "/events.html");
       registerById(Number(confirmId), true);
     } else {
       load();

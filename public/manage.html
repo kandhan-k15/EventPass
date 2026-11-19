@@ -21,7 +21,15 @@
     </div>
 
     <div class="card">
-      <label for="code">Check in by ticket code (type or paste)</label>
+      <strong>Check-in</strong>
+      <div class="toolbar">
+        <button class="btn small" id="scan" type="button">Scan with camera</button>
+      </div>
+      <div class="scan-box" id="scanbox" hidden>
+        <video id="video" playsinline muted></video>
+        <p class="hint">Hold the student’s QR code in front of the camera.</p>
+      </div>
+      <label for="code">Or type the code printed under the QR</label>
       <div class="toolbar" style="margin-bottom:0">
         <input id="code" placeholder="32-character ticket code" autocomplete="off">
         <button class="btn small" id="checkin" type="button">Check in</button>
@@ -44,11 +52,12 @@
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <script src="/js/app.js"></script>
   <script>
     if (!App.token()) location.href = "/";
     const user = App.user();
-    if (user.role !== "organizer") location.href = App.home(user);
+    if (!user || user.role !== "organizer") location.href = App.home(user);
     const eventId = Number(new URLSearchParams(location.search).get("event"));
     if (!eventId) location.href = "/organizer.html";
     document.getElementById("logout").onclick = App.logout;
@@ -68,11 +77,13 @@
       $("title").textContent = data.event;
       $("stats").textContent =
         data.registered + " registered, " + data.checked_in + " present, " +
-        (data.registered - data.checked_in) + " absent";
+        (data.registered - data.checked_in) + " absent" +
+        (data.waiting ? ", " + data.waiting + " on waiting list" : "");
 
       const q = $("search").value.trim().toLowerCase();
       const rows = data.attendees.filter((a) =>
-        (a.name + " " + a.email + " " + (a.department || "")).toLowerCase().includes(q));
+        (a.name + " " + a.email + " " + (a.department || "")).toLowerCase().includes(q)
+      );
 
       const body = $("rows");
       body.replaceChildren();
@@ -123,17 +134,80 @@
 
     $("search").addEventListener("input", () => data && render());
 
-    $("checkin").onclick = async () => {
-      const code = $("code").value.trim();
+    async function doCheckin(code) {
       try {
-        const r = await App.call("/api/checkin", { method: "POST", body: { ticket_code: code } });
-        App.say(msg, r.student_name + " checked in.", "ok");
-        $("code").value = "";
+        const r = await App.call("/api/checkin", {
+          method: "POST",
+          body: { ticket_code: code.trim(), event_id: eventId },
+        });
+        App.say(msg, "✓ " + r.student_name + " checked in.", "ok");
         await load();
+        return true;
       } catch (err) {
-        App.say(msg, err.message, "error"); // invalid, already checked in, wrong event...
+        App.say(msg, err.message, "error");
+        return false;
       }
+    }
+
+    $("checkin").onclick = async () => {
+      if (await doCheckin($("code").value)) $("code").value = "";
     };
+
+    const video = $("video");
+    const canvas = document.createElement("canvas");
+    let stream = null;
+    let scanning = false;
+    let lastCode = "";
+    let lastTime = 0;
+
+    function stopScan() {
+      scanning = false;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      stream = null;
+      video.srcObject = null;
+      $("scanbox").hidden = true;
+      $("scan").textContent = "Scan with camera";
+    }
+
+    function tick() {
+      if (!scanning) return;
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const found = jsQR(img.data, img.width, img.height);
+        if (found && found.data) {
+          const now = Date.now();
+          if (found.data !== lastCode || now - lastTime > 3000) {
+            lastCode = found.data;
+            lastTime = now;
+            doCheckin(found.data);
+          }
+        }
+      }
+      setTimeout(tick, 200);
+    }
+
+    $("scan").onclick = async () => {
+      if (scanning) return stopScan();
+      if (typeof jsQR === "undefined") {
+        return App.say(msg, "The scanner could not load. Type the code instead.", "error");
+      }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      } catch {
+        return App.say(msg, "Camera not available. Allow camera access (https:// or localhost), or type the code.", "error");
+      }
+      video.srcObject = stream;
+      await video.play();
+      $("scanbox").hidden = false;
+      $("scan").textContent = "Stop camera";
+      scanning = true;
+      tick();
+    };
+    window.addEventListener("pagehide", stopScan);
 
     $("download").onclick = async () => {
       try {

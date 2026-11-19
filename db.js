@@ -10,6 +10,10 @@ db.exec(`
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('student', 'organizer')),
+    department TEXT,
+    verified INTEGER NOT NULL DEFAULT 1,
+    otp_code TEXT,
+    otp_expires TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -21,6 +25,8 @@ db.exec(`
     event_date TEXT NOT NULL,
     seat_limit INTEGER NOT NULL CHECK (seat_limit > 0),
     organizer_id INTEGER NOT NULL REFERENCES users(id),
+    allowed_departments TEXT,
+    form_url TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -33,17 +39,36 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (user_id, event_id)
   );
+
+  CREATE TABLE IF NOT EXISTS waitlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    event_id INTEGER NOT NULL REFERENCES events(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, event_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    message TEXT NOT NULL,
+    is_read INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
-// Small "migration": add new columns to tables that already exist, keeping your data
 function addColumn(table, column, definition) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!columns.includes(column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
+
 addColumn("users", "department", "TEXT");
-addColumn("events", "allowed_departments", "TEXT"); // e.g. "IT,CSE"; empty means everyone
-addColumn("events", "form_url", "TEXT");            // optional Google Form link
+addColumn("users", "verified", "INTEGER NOT NULL DEFAULT 1");
+addColumn("users", "otp_code", "TEXT");
+addColumn("users", "otp_expires", "TEXT");
+addColumn("events", "allowed_departments", "TEXT");
+addColumn("events", "form_url", "TEXT");
 
 module.exports = db;

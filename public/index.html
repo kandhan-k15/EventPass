@@ -14,7 +14,7 @@
       <h1>Welcome to EventPass</h1>
       <p class="sub">Register for campus events and check in with a QR ticket.</p>
 
-      <div class="tabs">
+      <div class="tabs" id="auth-tabs">
         <button type="button" id="tab-login" class="active">Sign in</button>
         <button type="button" id="tab-signup">Create account</button>
       </div>
@@ -22,7 +22,7 @@
       <form id="form" novalidate>
         <div id="name-row" hidden>
           <label for="name">Full name</label>
-          <input id="name" autocomplete="name">
+          <input id="name" autocomplete="name" maxlength="60" placeholder="John Doe">
         </div>
 
         <label for="email">Email address</label>
@@ -39,71 +39,198 @@
           </select>
         </div>
 
+        <div id="org-code-row" hidden>
+          <label for="organizer-code">Organizer access code</label>
+          <input id="organizer-code" type="password" placeholder="Enter organizer secret code">
+        </div>
+
         <div id="dept-row" hidden>
           <label for="department">Department</label>
           <select id="department"></select>
         </div>
 
+        <div id="otp-row" hidden>
+          <label for="otp">Verification OTP Code</label>
+          <input id="otp" placeholder="6-digit OTP sent to email" maxlength="6">
+        </div>
+
         <button class="btn block" id="submit" type="submit">Sign in</button>
+        <div id="forgot-row" style="text-align: right; margin-top: 10px;">
+          <a href="#" id="forgot-link" style="font-size: 13px; color: var(--accent); font-weight: 600; text-decoration: none;">Forgot password?</a>
+        </div>
         <div id="msg" class="msg" role="alert"></div>
       </form>
     </div>
   </div>
 
+  <dialog id="forgot-dialog" style="text-align:left;">
+    <h2 style="margin-top:0;">Reset Password</h2>
+    <p class="meta">Enter your email to receive a 6-digit password reset OTP.</p>
+    <label for="reset-email">Email address</label>
+    <input id="reset-email" type="email" placeholder="name@example.com">
+    <div id="reset-step2" hidden>
+      <label for="reset-otp">Reset OTP</label>
+      <input id="reset-otp" placeholder="6-digit OTP" maxlength="6">
+      <label for="reset-new-password">New Password</label>
+      <input id="reset-new-password" type="password" placeholder="At least 8 characters">
+    </div>
+    <div id="reset-msg" class="msg"></div>
+    <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end;">
+      <button type="button" class="btn ghost" id="forgot-close">Cancel</button>
+      <button type="button" class="btn" id="forgot-send">Send OTP</button>
+      <button type="button" class="btn" id="reset-submit" hidden>Reset Password</button>
+    </div>
+  </dialog>
+
   <script src="/js/app.js"></script>
   <script>
-    if (App.token()) location.href = App.home(App.user()); // already logged in
+    const currentUser = App.user();
+    if (currentUser && App.token()) location.href = App.home(currentUser);
 
     let mode = "login";
     const $ = (id) => document.getElementById(id);
 
     function setMode(next) {
       mode = next;
+      $("auth-tabs").hidden = mode === "verify";
       $("tab-login").classList.toggle("active", mode === "login");
       $("tab-signup").classList.toggle("active", mode === "signup");
-      $("name-row").hidden = mode === "login";
-      $("role-row").hidden = mode === "login";
-      $("dept-row").hidden = mode === "login";
-      $("submit").textContent = mode === "login" ? "Sign in" : "Create account";
+      $("name-row").hidden = mode !== "signup";
+      $("role-row").hidden = mode !== "signup";
+      $("dept-row").hidden = mode !== "signup";
+      $("org-code-row").hidden = mode !== "signup" || $("role").value !== "organizer";
+      $("otp-row").hidden = mode !== "verify";
+      $("forgot-row").hidden = mode !== "login";
+      $("submit").textContent = mode === "login" ? "Sign in" : mode === "signup" ? "Create account" : "Verify OTP";
       $("msg").className = "msg";
     }
+
     $("tab-login").onclick = () => setMode("login");
     $("tab-signup").onclick = () => setMode("signup");
+    $("role").addEventListener("change", () => {
+      $("org-code-row").hidden = mode !== "signup" || $("role").value !== "organizer";
+    });
 
     App.call("/api/departments", { noAuth: true }).then((list) => {
       $("department").replaceChildren(...list.map((d) => new Option(d, d)));
     });
+
+    let pendingEmail = "";
 
     $("form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const email = $("email").value.trim();
       const password = $("password").value;
       const msg = $("msg");
+
+      if (mode === "verify") {
+        const otp = $("otp").value.trim();
+        if (!otp) return App.say(msg, "Please enter the verification OTP.", "error");
+        $("submit").disabled = true;
+        try {
+          const data = await App.call("/api/verify-otp", {
+            method: "POST",
+            noAuth: true,
+            body: { email: pendingEmail, otp },
+          });
+          App.save(data.token, data.user);
+          location.href = App.home(data.user);
+        } catch (err) {
+          App.say(msg, err.message, "error");
+        } finally {
+          $("submit").disabled = false;
+        }
+        return;
+      }
+
+      if (mode === "signup" && !/^\p{L}[\p{L}\p{M} .'-]{1,59}$/u.test($("name").value.trim())) {
+        return App.say(msg, "Name can contain only letters and spaces (2 to 60 characters).", "error");
+      }
+      if (!email) {
+        return App.say(msg, "Please enter an email address.", "error");
+      }
       $("submit").disabled = true;
 
       try {
         if (mode === "signup") {
-          await App.call("/api/signup", {
+          const res = await App.call("/api/signup", {
             method: "POST",
             noAuth: true,
-            body: { name: $("name").value, email, password, role: $("role").value, department: $("department").value },
+            body: {
+              name: $("name").value,
+              email,
+              password,
+              role: $("role").value,
+              department: $("department").value,
+              organizer_code: $("organizer-code").value,
+            },
           });
+          pendingEmail = email;
+          App.say(msg, res.message, "ok");
+          setMode("verify");
+        } else {
+          const data = await App.call("/api/login", {
+            method: "POST",
+            noAuth: true,
+            body: { email, password },
+          });
+          App.save(data.token, data.user);
+          const next = sessionStorage.getItem("afterLogin");
+          sessionStorage.removeItem("afterLogin");
+          location.href = next && next.startsWith("/") && !next.startsWith("//") ? next : App.home(data.user);
         }
-        const data = await App.call("/api/login", {
-          method: "POST",
-          noAuth: true,
-          body: { email, password },
-        });
-        App.save(data.token, data.user);
-        const next = sessionStorage.getItem("afterLogin");
-        sessionStorage.removeItem("afterLogin");
-        location.href = next && next.startsWith("/") && !next.startsWith("//") ? next : App.home(data.user);
       } catch (err) {
-        App.say(msg, err.message, "error");
+        if (err.message.includes("verify your email")) {
+          pendingEmail = email;
+          setMode("verify");
+          App.say(msg, "Please enter the OTP sent to your email.", "error");
+        } else {
+          App.say(msg, err.message, "error");
+        }
       } finally {
         $("submit").disabled = false;
       }
     });
+
+    const forgotDialog = $("forgot-dialog");
+    $("forgot-link").onclick = (e) => {
+      e.preventDefault();
+      $("reset-step2").hidden = true;
+      $("forgot-send").hidden = false;
+      $("reset-submit").hidden = true;
+      $("reset-msg").className = "msg";
+      forgotDialog.showModal();
+    };
+    $("forgot-close").onclick = () => forgotDialog.close();
+
+    $("forgot-send").onclick = async () => {
+      const email = $("reset-email").value.trim();
+      const rMsg = $("reset-msg");
+      if (!email) return App.say(rMsg, "Enter your email address.", "error");
+      try {
+        await App.call("/api/forgot-password", { method: "POST", noAuth: true, body: { email } });
+        App.say(rMsg, "Reset OTP sent to your email.", "ok");
+        $("reset-step2").hidden = false;
+        $("forgot-send").hidden = true;
+        $("reset-submit").hidden = false;
+      } catch (err) {
+        App.say(rMsg, err.message, "error");
+      }
+    };
+
+    $("reset-submit").onclick = async () => {
+      const email = $("reset-email").value.trim();
+      const otp = $("reset-otp").value.trim();
+      const newPassword = $("reset-new-password").value;
+      const rMsg = $("reset-msg");
+      try {
+        await App.call("/api/reset-password", { method: "POST", noAuth: true, body: { email, otp, newPassword } });
+        App.say(rMsg, "Password successfully reset! You can now sign in.", "ok");
+        setTimeout(() => forgotDialog.close(), 1800);
+      } catch (err) {
+        App.say(rMsg, err.message, "error");
+      }
+    };
   </script>
 </body>
 </html>

@@ -28,7 +28,7 @@
   <script>
     if (!App.token()) location.href = "/";
     const user = App.user();
-    if (user.role !== "student") location.href = App.home(user);
+    if (!user || user.role !== "student") location.href = App.home(user);
     document.getElementById("who").textContent = user.name;
     document.getElementById("logout").onclick = App.logout;
 
@@ -50,7 +50,11 @@
         const img = el("img");
         img.alt = "QR code for " + ticket.title;
         img.src = data.qr;
-        box.append(img, el("div", "code", data.ticket_code));
+        box.append(
+          img,
+          el("div", "hint", "If the QR will not scan, give this code to the organizer:"),
+          el("div", "code", data.ticket_code)
+        );
         btn.hidden = true;
       } catch (err) {
         App.say(msg, err.message, "error");
